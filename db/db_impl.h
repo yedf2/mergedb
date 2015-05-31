@@ -22,6 +22,7 @@ class TableCache;
 class Version;
 class VersionEdit;
 class VersionSet;
+class Compaction;
 
 class DBImpl : public DB {
  public:
@@ -108,6 +109,7 @@ class DBImpl : public DB {
   static void BGWork(void* db);
   void BackgroundCall();
   void  BackgroundCompaction() EXCLUSIVE_LOCKS_REQUIRED(mutex_);
+  void CompactAndRelease(Compaction* c, bool is_manual, InternalKey manual_end);
   void CleanupCompaction(CompactionState* compact)
       EXCLUSIVE_LOCKS_REQUIRED(mutex_);
   Status DoCompactionWork(CompactionState* compact)

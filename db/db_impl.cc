@@ -32,6 +32,7 @@
 #include "util/coding.h"
 #include "util/logging.h"
 #include "util/mutexlock.h"
+#include "dbformat.h"
 
 namespace leveldb {
 
@@ -147,6 +148,7 @@ DBImpl::DBImpl(const Options& raw_options, const std::string& dbname)
 
 DBImpl::~DBImpl() {
   // Wait for background work to finish
+  time_t wait1 = time(NULL);
   mutex_.Lock();
   shutting_down_.Release_Store(this);  // Any non-NULL value is ok
   while (bg_compaction_scheduled_) {
@@ -154,6 +156,8 @@ DBImpl::~DBImpl() {
   }
   mutex_.Unlock();
 
+  time_t wait2 = time(NULL);
+  Log(options_.info_log, "shutdown used %lu seconds", wait2 - wait1);
   if (db_lock_ != NULL) {
     env_->UnlockFile(db_lock_);
   }
@@ -511,7 +515,7 @@ void DBImpl::CompactMemTable() {
   Status s = WriteLevel0Table(imm_, &edit, base);
   base->Unref();
 
-  if (s.ok() && shutting_down_.Acquire_Load()) {
+  if (s.ok() && options_.shutdown_before_compaction && shutting_down_.Acquire_Load()) {
     s = Status::IOError("Deleting DB during memtable compaction");
   }
 
@@ -660,15 +664,16 @@ void DBImpl::BackgroundCompaction() {
     return;
   }
 
-  Compaction* c;
+  Compaction* c = NULL;
   bool is_manual = (manual_compaction_ != NULL);
   InternalKey manual_end;
   if (is_manual) {
     ManualCompaction* m = manual_compaction_;
-    c = versions_->CompactRange(m->level, m->begin, m->end);
-    m->done = (c == NULL);
-    if (c != NULL) {
-      manual_end = c->input(0, c->num_input_files(0) - 1)->largest;
+    SingleLevelCompaction* sc = versions_->CompactRange(m->level, m->begin, m->end);
+    c = sc;
+    m->done = (sc == NULL);
+    if (sc != NULL) {
+      manual_end = sc->inputs_[m->level].back()->largest;
     }
     Log(options_.info_log,
         "Manual compaction at level-%d from %s .. %s; will stop at %s\n",
@@ -677,28 +682,32 @@ void DBImpl::BackgroundCompaction() {
         (m->end ? m->end->DebugString().c_str() : "(end)"),
         (m->done ? "(end)" : manual_end.DebugString().c_str()));
   } else {
-    c = versions_->PickCompaction();
+    c = versions_->PickCompaction(config::kNumLevels);
   }
+  CompactAndRelease(c, is_manual, manual_end);
+}
 
+void DBImpl::CompactAndRelease(Compaction* c, bool is_manual, InternalKey manual_end) {
   Status status;
   if (c == NULL) {
     // Nothing to do
-  } else if (!is_manual && c->IsTrivialMove()) {
-    // Move file to next level
-    assert(c->num_input_files(0) == 1);
-    FileMetaData* f = c->input(0, 0);
-    c->edit()->DeleteFile(c->level(), f->number);
-    c->edit()->AddFile(c->level() + 1, f->number, f->file_size,
-                       f->smallest, f->largest);
+  } else if (!is_manual && c->IsTrivialMove(user_comparator())) {
+    int rlevel = c->GetResultLevel(c->input_bytes_);
+    for (int i = 0; i < rlevel; i ++) {
+      for (int j = 0; j < c->inputs_[i].size(); j++) {
+        FileMetaData* f = c->inputs_[i][j];
+        c->edit()->DeleteFile(i, f->number);
+        c->edit()->AddFile(rlevel, f->number,
+                           f->file_size, f->smallest, f->largest);
+      }
+    }
     status = versions_->LogAndApply(c->edit(), &mutex_);
     if (!status.ok()) {
       RecordBackgroundError(status);
     }
     VersionSet::LevelSummaryStorage tmp;
-    Log(options_.info_log, "Moved #%lld to level-%d %lld bytes %s: %s\n",
-        static_cast<unsigned long long>(f->number),
-        c->level() + 1,
-        static_cast<unsigned long long>(f->file_size),
+    Log(options_.info_log, "Moved %lu files to level-%d %lu bytes %s: %s\n",
+        c->input_files_, rlevel, c->input_bytes_,
         status.ToString().c_str(),
         versions_->LevelSummary(&tmp));
   } else {
@@ -764,6 +773,7 @@ Status DBImpl::OpenCompactionOutputFile(CompactionState* compact) {
     pending_outputs_.insert(file_number);
     CompactionState::Output out;
     out.number = file_number;
+    out.file_size = 0;
     out.smallest.Clear();
     out.largest.Clear();
     compact->outputs.push_back(out);
@@ -833,20 +843,17 @@ Status DBImpl::FinishCompactionOutputFile(CompactionState* compact,
 
 Status DBImpl::InstallCompactionResults(CompactionState* compact) {
   mutex_.AssertHeld();
-  Log(options_.info_log,  "Compacted %d@%d + %d@%d files => %lld bytes",
-      compact->compaction->num_input_files(0),
-      compact->compaction->level(),
-      compact->compaction->num_input_files(1),
-      compact->compaction->level() + 1,
+  int nlevel = compact->compaction->GetResultLevel(compact->total_bytes);
+  Log(options_.info_log,  "Compacted inputs => level-%d %lu files %lld bytes",
+      nlevel, compact->outputs.size(),
       static_cast<long long>(compact->total_bytes));
 
   // Add compaction outputs
   compact->compaction->AddInputDeletions(compact->compaction->edit());
-  const int level = compact->compaction->level();
   for (size_t i = 0; i < compact->outputs.size(); i++) {
     const CompactionState::Output& out = compact->outputs[i];
     compact->compaction->edit()->AddFile(
-        level + 1,
+        nlevel,
         out.number, out.file_size, out.smallest, out.largest);
   }
   return versions_->LogAndApply(compact->compaction->edit(), &mutex_);
@@ -856,13 +863,6 @@ Status DBImpl::DoCompactionWork(CompactionState* compact) {
   const uint64_t start_micros = env_->NowMicros();
   int64_t imm_micros = 0;  // Micros spent doing imm_ compactions
 
-  Log(options_.info_log,  "Compacting %d@%d + %d@%d files",
-      compact->compaction->num_input_files(0),
-      compact->compaction->level(),
-      compact->compaction->num_input_files(1),
-      compact->compaction->level() + 1);
-
-  assert(versions_->NumLevelFiles(compact->compaction->level()) > 0);
   assert(compact->builder == NULL);
   assert(compact->outfile == NULL);
   if (snapshots_.empty()) {
@@ -881,7 +881,7 @@ Status DBImpl::DoCompactionWork(CompactionState* compact) {
   std::string current_user_key;
   bool has_current_user_key = false;
   SequenceNumber last_sequence_for_key = kMaxSequenceNumber;
-  for (; input->Valid() && !shutting_down_.Acquire_Load(); ) {
+  for (; input->Valid() && !(options_.shutdown_before_compaction && shutting_down_.Acquire_Load()); ) {
     // Prioritize immutable compaction work
     if (has_imm_.NoBarrier_Load() != NULL) {
       const uint64_t imm_start = env_->NowMicros();
@@ -889,19 +889,16 @@ Status DBImpl::DoCompactionWork(CompactionState* compact) {
       if (imm_ != NULL) {
         CompactMemTable();
         bg_cv_.SignalAll();  // Wakeup MakeRoomForWrite() if necessary
+        Compaction* c = versions_->PickCompaction(compact->compaction->low_level_);
+        if (c) {
+          CompactAndRelease(c, false, InternalKey());
+        }
       }
       mutex_.Unlock();
       imm_micros += (env_->NowMicros() - imm_start);
     }
 
     Slice key = input->key();
-    if (compact->compaction->ShouldStopBefore(key) &&
-        compact->builder != NULL) {
-      status = FinishCompactionOutputFile(compact, input);
-      if (!status.ok()) {
-        break;
-      }
-    }
 
     // Handle key/value, add to state, etc.
     bool drop = false;
@@ -975,7 +972,7 @@ Status DBImpl::DoCompactionWork(CompactionState* compact) {
     input->Next();
   }
 
-  if (status.ok() && shutting_down_.Acquire_Load()) {
+  if (status.ok() && options_.shutdown_before_compaction && shutting_down_.Acquire_Load()) {
     status = Status::IOError("Deleting DB during compaction");
   }
   if (status.ok() && compact->builder != NULL) {
@@ -989,17 +986,14 @@ Status DBImpl::DoCompactionWork(CompactionState* compact) {
 
   CompactionStats stats;
   stats.micros = env_->NowMicros() - start_micros - imm_micros;
-  for (int which = 0; which < 2; which++) {
-    for (int i = 0; i < compact->compaction->num_input_files(which); i++) {
-      stats.bytes_read += compact->compaction->input(which, i)->file_size;
-    }
-  }
+  stats.bytes_read = compact->compaction->input_bytes_;
   for (size_t i = 0; i < compact->outputs.size(); i++) {
     stats.bytes_written += compact->outputs[i].file_size;
   }
 
   mutex_.Lock();
-  stats_[compact->compaction->level() + 1].Add(stats);
+  int level = compact->compaction->GetResultLevel(stats.bytes_written);
+  stats_[level].Add(stats);
 
   if (status.ok()) {
     status = InstallCompactionResults(compact);
@@ -1009,7 +1003,9 @@ Status DBImpl::DoCompactionWork(CompactionState* compact) {
   }
   VersionSet::LevelSummaryStorage tmp;
   Log(options_.info_log,
-      "compacted to: %s", versions_->LevelSummary(&tmp));
+      "compacted to: read %lld written %lld used %lld micros status %s %s",
+      stats.bytes_read, stats.bytes_written, stats.micros, status.ToString().c_str(),
+      versions_->LevelSummary(&tmp));
   return status;
 }
 

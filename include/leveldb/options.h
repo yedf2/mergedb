@@ -105,6 +105,11 @@ struct Options {
   // Default: 4K
   size_t block_size;
 
+  // Whether abort the compaction when db deleted.
+  //
+  // Default: true
+  bool shutdown_before_compaction;
+
   // Number of keys between restart points for delta encoding of keys.
   // This parameter can be changed dynamically.  Most clients should
   // leave this parameter alone.

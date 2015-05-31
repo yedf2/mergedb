@@ -165,6 +165,9 @@ class Stats {
   double finish_;
   double seconds_;
   int done_;
+  int last_report_;
+  double last_report_time_;
+  double min_qps_;
   int next_report_;
   int64_t bytes_;
   double last_op_finish_;
@@ -181,7 +184,10 @@ class Stats {
     done_ = 0;
     bytes_ = 0;
     seconds_ = 0;
+    last_report_ = 0;
     start_ = Env::Default()->NowMicros();
+    last_report_time_ = start_;
+    min_qps_ = 100000;
     finish_ = start_;
     message_.clear();
   }
@@ -208,8 +214,8 @@ class Stats {
   }
 
   void FinishedSingleOp() {
-    if (FLAGS_histogram) {
       double now = Env::Default()->NowMicros();
+    if (FLAGS_histogram) {
       double micros = now - last_op_finish_;
       hist_.Add(micros);
       if (micros > 20000) {
@@ -221,14 +227,15 @@ class Stats {
 
     done_++;
     if (done_ >= next_report_) {
+        double qps = (done_ - last_report_) / (now - last_report_time_) * 1000 * 1000;
+        if (min_qps_ > qps) min_qps_ = qps;
+        last_report_ = done_;
+        last_report_time_ = now;
       if      (next_report_ < 1000)   next_report_ += 100;
       else if (next_report_ < 5000)   next_report_ += 500;
       else if (next_report_ < 10000)  next_report_ += 1000;
-      else if (next_report_ < 50000)  next_report_ += 5000;
-      else if (next_report_ < 100000) next_report_ += 10000;
-      else if (next_report_ < 500000) next_report_ += 50000;
-      else                            next_report_ += 100000;
-      fprintf(stderr, "... finished %d ops%30s\r", done_, "");
+      else next_report_ += 5000;
+      fprintf(stderr, "... finished %d ops%30s min qps: %.2f qps %.2f\r", done_, "", min_qps_, qps);
       fflush(stderr);
     }
   }
@@ -700,6 +707,7 @@ class Benchmark {
     options.write_buffer_size = FLAGS_write_buffer_size;
     options.max_open_files = FLAGS_open_files;
     options.filter_policy = filter_policy_;
+    options.shutdown_before_compaction = false;
     Status s = DB::Open(options, FLAGS_db, &db_);
     if (!s.ok()) {
       fprintf(stderr, "open error: %s\n", s.ToString().c_str());

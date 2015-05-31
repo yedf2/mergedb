@@ -22,12 +22,14 @@
 #include "db/version_edit.h"
 #include "port/port.h"
 #include "port/thread_annotations.h"
+#include "dbformat.h"
 
 namespace leveldb {
 
 namespace log { class Writer; }
 
 class Compaction;
+class SingleLevelCompaction;
 class Iterator;
 class MemTable;
 class TableBuilder;
@@ -35,6 +37,9 @@ class TableCache;
 class Version;
 class VersionSet;
 class WritableFile;
+
+// Return the string desc all level file numbers
+extern std::string LevelSummary(std::vector<FileMetaData*> files[]);
 
 // Return the smallest index i such that files[i]->largest >= key.
 // Return files.size() if there is no such file.
@@ -145,6 +150,8 @@ class Version {
   // Score < 1 means compaction is not strictly needed.  These fields
   // are initialized by Finalize().
   double compaction_score_;
+  int top_level_;
+  bool no_compaction_;
   int compaction_level_;
 
   explicit Version(VersionSet* vset)
@@ -152,6 +159,8 @@ class Version {
         file_to_compact_(NULL),
         file_to_compact_level_(-1),
         compaction_score_(-1),
+        top_level_(-1),
+        no_compaction_(false),
         compaction_level_(-1) {
   }
 
@@ -228,13 +237,13 @@ class VersionSet {
   // Returns NULL if there is no compaction to be done.
   // Otherwise returns a pointer to a heap-allocated object that
   // describes the compaction.  Caller should delete the result.
-  Compaction* PickCompaction();
+  Compaction* PickCompaction(int level_outer);
 
   // Return a compaction object for compacting the range [begin,end] in
   // the specified level.  Returns NULL if there is nothing in that
   // level that overlaps the specified range.  Caller should delete
   // the result.
-  Compaction* CompactRange(
+  SingleLevelCompaction* CompactRange(
       int level,
       const InternalKey* begin,
       const InternalKey* end);
@@ -264,7 +273,7 @@ class VersionSet {
   // Return a human-readable short (single-line) summary of the number
   // of files per level.  Uses *scratch as backing store.
   struct LevelSummaryStorage {
-    char buffer[100];
+    char buffer[1024];
   };
   const char* LevelSummary(LevelSummaryStorage* scratch) const;
 
@@ -272,6 +281,7 @@ class VersionSet {
   class Builder;
 
   friend class Compaction;
+  friend class SingleLevelCompaction;
   friend class Version;
 
   void Finalize(Version* v);
@@ -285,7 +295,7 @@ class VersionSet {
                  InternalKey* smallest,
                  InternalKey* largest);
 
-  void SetupOtherInputs(Compaction* c);
+  void SetupOtherInputs(SingleLevelCompaction* c);
 
   // Save current contents to *log
   Status WriteSnapshot(log::Writer* log);
@@ -318,31 +328,16 @@ class VersionSet {
   void operator=(const VersionSet&);
 };
 
-// A Compaction encapsulates information about a compaction.
-class Compaction {
- public:
-  ~Compaction();
-
-  // Return the level that is being compacted.  Inputs from "level"
-  // and "level+1" will be merged to produce a set of "level+1" files.
-  int level() const { return level_; }
+class Compaction{
+public:
+  virtual ~Compaction();
 
   // Return the object that holds the edits to the descriptor done
   // by this compaction.
   VersionEdit* edit() { return &edit_; }
 
-  // "which" must be either 0 or 1
-  int num_input_files(int which) const { return inputs_[which].size(); }
-
-  // Return the ith input file at "level()+which" ("which" must be 0 or 1).
-  FileMetaData* input(int which, int i) const { return inputs_[which][i]; }
-
   // Maximum size of files to build during this compaction.
   uint64_t MaxOutputFileSize() const { return max_output_file_size_; }
-
-  // Is this a trivial compaction that can be implemented by just
-  // moving a single input file to the next level (no merging or splitting)
-  bool IsTrivialMove() const;
 
   // Add all inputs to this compaction as delete operations to *edit.
   void AddInputDeletions(VersionEdit* edit);
@@ -352,35 +347,33 @@ class Compaction {
   // in levels greater than "level+1".
   bool IsBaseLevelForKey(const Slice& user_key);
 
-  // Returns true iff we should stop building the current output
-  // before processing "internal_key".
-  bool ShouldStopBefore(const Slice& internal_key);
-
   // Release the input version for the compaction, once the compaction
   // is successful.
   void ReleaseInputs();
 
- private:
+  bool IsTrivialMove(const Comparator* ucmp) const ;
+
+  virtual int GetResultLevel(size_t bytes) = 0;
+
+  void FinishInputs();
+
+protected:
   friend class Version;
   friend class VersionSet;
+  friend class DBImpl;
 
-  explicit Compaction(int level);
-
-  int level_;
+  Compaction(Version* input_version);
   uint64_t max_output_file_size_;
   Version* input_version_;
   VersionEdit edit_;
 
-  // Each compaction reads inputs from "level_" and "level_+1"
-  std::vector<FileMetaData*> inputs_[2];      // The two sets of inputs
+  std::vector<FileMetaData*> inputs_[config::kNumLevels];
 
-  // State used to check for number of of overlapping grandparent files
-  // (parent == level_ + 1, grandparent == level_ + 2)
-  std::vector<FileMetaData*> grandparents_;
-  size_t grandparent_index_;  // Index in grandparent_starts_
-  bool seen_key_;             // Some output key has been seen
-  int64_t overlapped_bytes_;  // Bytes of overlap between current output
-                              // and grandparent files
+  size_t input_bytes_;
+  size_t input_files_;
+  int high_level_; //highest level for inputs
+  int low_level_; //lowest level for inputs
+  int max_level_; //highest level for input_version
 
   // State for implementing IsBaseLevelForKey
 
@@ -389,6 +382,46 @@ class Compaction {
   // higher level than the ones involved in this compaction (i.e. for
   // all L >= level_ + 2).
   size_t level_ptrs_[config::kNumLevels];
+};
+
+class SingleLevelCompaction: public Compaction {
+public:
+    int level_;
+    SingleLevelCompaction(Version* version, int level):
+      Compaction(version), level_(level) {}
+    virtual int GetResultLevel(size_t bytes) { return level_ + 1; }
+};
+
+class MultiLevelCompaction: public Compaction {
+    static size_t level_bytes_[config::kNumLevels];
+public:
+    int level_outer_;
+    size_t write_buffer_size_;
+
+    // Is this a trivial compaction that can be implemented by just
+    // moving a single input file to the next level (no merging or splitting)
+    bool IsTrivialMove(const Comparator* ucmp) const;
+
+    int GetResultLevel(size_t bytes);
+
+    size_t GetLevelBytes(int level) { return level_bytes_[level]; }
+
+    int GetBytesLevel(size_t bytes) {
+        return std::upper_bound(level_bytes_, level_bytes_+config::kNumLevels, bytes) - level_bytes_;
+    }
+
+    MultiLevelCompaction(Version* version, long write_buffer_size, int level_outer):
+        Compaction(version),
+        level_outer_(level_outer),
+        write_buffer_size_(write_buffer_size) {
+            if (!level_bytes_[0]) {
+                level_bytes_[0] = (config::kL0_CompactionTrigger - 1) * write_buffer_size_;
+                for (int i = 1; i < config::kNumLevels; i++) {
+                    level_bytes_[i] = level_bytes_[i - 1] * config::kLevelRatio;
+                }
+            }
+    }
+
 };
 
 }  // namespace leveldb
