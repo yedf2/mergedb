@@ -27,7 +27,7 @@ On an aliyun ECS with
 ### Test. Bulk Load of keys in sequential order
 The database is empty at the beginning of this benchmark run and gradually fills up. No data is being read when the data load is in progress.
 
-    mergedb: MB/sec (total data size GB)
+    mergedb: 133.638 micros/op;   29.3 MB/s (total data size 7.9GB)
     leveldb: 145.569 micros/op;   26.9 MB/s (total data size 7.9GB)
 
 Here is the command for the test
@@ -43,11 +43,11 @@ Notice, mergedb does better when the database is larger(but i don't get an idea 
 Here is the command for the test
     ./db_bench --benchmarks=overwrite --num=2000000 --threads=1 --value_size=4096 --cache_size=104857600 --bloom_bits=10 --open_files=500000 --db=ldb --compression_ratio=1 --write_buffer_size=2097152 --use_existing_db=1
     
-### Test3. Random Read
-Measure random read performance of a database with all keys. The database was first created by sequentially inserting keys. Once the load is complete, we drop the file cache(or else most read will be in cache), then the benchmark randomly picks a key and issues a read request. The above measure measurement does not include the data loading part, it measures only the part that issues the random reads to database. 
+### Test. Random Read
+Measure random read performance of a database with all keys. The database was first created by sequentially inserting keys and then overwrite all keys randomly. Once the last random write is complete, we drop the file cache(or else most read will be in cache), then the benchmark randomly picks a key and issues a read request. The above measure measurement does not include the data loading and overwriting part, it measures only the part that issues the random reads to database. 
 
     mergedb: 
-    leveldb: 5068.182 micros/op    197.31 op/s
+    leveldb: 5213.182 micros/op    191.80 op/s
 
 Here is the command for the test
     echo 1 > /proc/sys/vm/drop_caches; ./db_bench --benchmarks=readrandom --num=2000000 --threads=1 --value_size=4096 --cache_size=104857600 --bloom_bits=10 --open_files=500000 --db=ldb --compression_ratio=1 --write_buffer_size=2097152 --use_existing_db=1 --reads=20000
