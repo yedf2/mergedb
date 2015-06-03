@@ -38,7 +38,7 @@ Measure performance to randomly overwrite all keys into the database. The databa
 Notice, mergedb does better when the database is larger(but i don't get an idea machine)
 
     mergedb: MB/sec (total data size GB)
-    leveldb: MB/sec (total data size GB)
+    leveldb: 2130.180 micros/op;    1.8 MB/s (total data size 12GB)
 
 Here is the command for the test
     ./db_bench --benchmarks=overwrite --num=2000000 --threads=1 --value_size=4096 --cache_size=104857600 --bloom_bits=10 --open_files=500000 --db=ldb --compression_ratio=1 --write_buffer_size=2097152 --use_existing_db=1
