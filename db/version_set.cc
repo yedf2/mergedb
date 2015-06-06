@@ -1309,10 +1309,11 @@ Compaction* VersionSet::PickCompaction(int level_outer) {
             total_bytes += levelTotal;
             total_files += NumLevelFiles(i);
             c->inputs_[i] = current_->files_[i];
-            if (i < 2 && level2_bytes > c->GetLevelBytes(2)) { // level2 need compaction
+            if (i < 2 && level2_bytes > c->GetLevelBytes(2)) {
+            // level2 need compaction, special case when fillseq
                 continue;
             }
-            if (i && total_bytes < c->GetLevelBytes(i)) {
+            if (i && !NumLevelFiles(i) && total_bytes < c->GetLevelBytes(i)) {
                 Log(options_->info_log, "i %d total %ld level max %ld",
                     i, total_bytes/options_->write_buffer_size,
                     c->GetLevelBytes(i)/options_->write_buffer_size);
@@ -1322,7 +1323,7 @@ Compaction* VersionSet::PickCompaction(int level_outer) {
     }
     c->FinishInputs();
     summary = leveldb::LevelSummary(c->inputs_);
-    bool stalling = c->input_bytes_ > c->GetLevelBytes(level_outer-1) * 2;
+    bool stalling = c->high_level_ == c->level_outer_ - 1;
     if (c->input_bytes_) {
         Log(options_->info_log, "Compacting %ld files %ld bytes level_outer %d c->level_outer %d stalling %d %s",
             c->input_files_, c->input_bytes_, level_outer, c->level_outer_, stalling, summary.c_str());
