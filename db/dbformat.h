@@ -21,6 +21,9 @@ namespace leveldb {
 namespace config {
 static const int kNumLevels = 28;
 
+// Release Compaction input file when output files reach this threshold
+static const int kReleaseCompactionFileTrigger = 64;
+
 // Max levels will be compact in a single compaction
 static const int kCompactLevelsMax = 4;
 

@@ -109,6 +109,7 @@ class DBImpl : public DB {
   static void BGWork(void* db);
   void BackgroundCall();
   void  BackgroundCompaction() EXCLUSIVE_LOCKS_REQUIRED(mutex_);
+  Status MaybeReleaseFiles(CompactionState* compact, Iterator*& input);
   void CompactAndRelease(Compaction* c, bool is_manual, InternalKey manual_end);
   void CleanupCompaction(CompactionState* compact)
       EXCLUSIVE_LOCKS_REQUIRED(mutex_);
@@ -116,8 +117,9 @@ class DBImpl : public DB {
       EXCLUSIVE_LOCKS_REQUIRED(mutex_);
 
   Status OpenCompactionOutputFile(CompactionState* compact);
-  Status FinishCompactionOutputFile(CompactionState* compact, Iterator* input);
-  Status InstallCompactionResults(CompactionState* compact)
+  Status FinishCompaction(CompactionState* compact, Iterator* input);
+  Status FinishCompactionOutputFile(CompactionState* compact, Iterator*& input);
+  Status InstallCompactionResults(CompactionState* compact, Iterator* input)
       EXCLUSIVE_LOCKS_REQUIRED(mutex_);
 
   // Constant after construction

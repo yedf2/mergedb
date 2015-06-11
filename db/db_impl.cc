@@ -33,6 +33,8 @@
 #include "util/logging.h"
 #include "util/mutexlock.h"
 #include "dbformat.h"
+#include "version_set.h"
+#include "version_edit.h"
 
 namespace leveldb {
 
@@ -674,24 +676,29 @@ void DBImpl::BackgroundCompaction() {
     m->done = (sc == NULL);
     if (sc != NULL) {
       manual_end = sc->inputs_[m->level].back()->largest;
+      VersionSet::LevelSummaryStorage tmp;
+      Log(options_.info_log,
+          "Manual compaction at level-%d from %s .. %s; will stop at %s compact %s version %s\n",
+          m->level,
+          (m->begin ? m->begin->DebugString().c_str() : "(begin)"),
+          (m->end ? m->end->DebugString().c_str() : "(end)"),
+          (m->done ? "(end)" : manual_end.DebugString().c_str()),
+          leveldb::LevelSummary(c->inputs_).c_str(),
+          versions_->LevelSummary(&tmp));
     }
-    Log(options_.info_log,
-        "Manual compaction at level-%d from %s .. %s; will stop at %s\n",
-        m->level,
-        (m->begin ? m->begin->DebugString().c_str() : "(begin)"),
-        (m->end ? m->end->DebugString().c_str() : "(end)"),
-        (m->done ? "(end)" : manual_end.DebugString().c_str()));
   } else {
     c = versions_->PickCompaction(config::kNumLevels);
   }
+  if (c == NULL) return;
   CompactAndRelease(c, is_manual, manual_end);
+  delete c;
+  DeleteObsoleteFiles();
+
 }
 
 void DBImpl::CompactAndRelease(Compaction* c, bool is_manual, InternalKey manual_end) {
   Status status;
-  if (c == NULL) {
-    // Nothing to do
-  } else if (!is_manual && c->IsTrivialMove(user_comparator())) {
+  if (!is_manual && c->IsTrivialMove(user_comparator())) {
     int rlevel = c->GetResultLevel(c->input_bytes_);
     for (int i = 0; i < rlevel; i ++) {
       for (int j = 0; j < c->inputs_[i].size(); j++) {
@@ -706,9 +713,10 @@ void DBImpl::CompactAndRelease(Compaction* c, bool is_manual, InternalKey manual
       RecordBackgroundError(status);
     }
     VersionSet::LevelSummaryStorage tmp;
-    Log(options_.info_log, "Moved %lu files to level-%d %lu bytes %s: %s\n",
+    Log(options_.info_log, "Moved %lld files to level-%d %lld bytes %s: intput %s version %s\n",
         c->input_files_, rlevel, c->input_bytes_,
         status.ToString().c_str(),
+        LevelSummary(c->inputs_).c_str(),
         versions_->LevelSummary(&tmp));
   } else {
     CompactionState* compact = new CompactionState(c);
@@ -717,10 +725,7 @@ void DBImpl::CompactAndRelease(Compaction* c, bool is_manual, InternalKey manual
       RecordBackgroundError(status);
     }
     CleanupCompaction(compact);
-    c->ReleaseInputs();
-    DeleteObsoleteFiles();
   }
-  delete c;
 
   if (status.ok()) {
     // Done
@@ -746,7 +751,7 @@ void DBImpl::CompactAndRelease(Compaction* c, bool is_manual, InternalKey manual
   }
 }
 
-void DBImpl::CleanupCompaction(CompactionState* compact) {
+void DBImpl::CleanupCompaction(CompactionState *compact) {
   mutex_.AssertHeld();
   if (compact->builder != NULL) {
     // May happen if we get a shutdown call in the middle of compaction
@@ -756,10 +761,6 @@ void DBImpl::CleanupCompaction(CompactionState* compact) {
     assert(compact->outfile == NULL);
   }
   delete compact->outfile;
-  for (size_t i = 0; i < compact->outputs.size(); i++) {
-    const CompactionState::Output& out = compact->outputs[i];
-    pending_outputs_.erase(out.number);
-  }
   delete compact;
 }
 
@@ -790,7 +791,7 @@ Status DBImpl::OpenCompactionOutputFile(CompactionState* compact) {
 }
 
 Status DBImpl::FinishCompactionOutputFile(CompactionState* compact,
-                                          Iterator* input) {
+                                          Iterator*& input) {
   assert(compact != NULL);
   assert(compact->outfile != NULL);
   assert(compact->builder != NULL);
@@ -837,26 +838,104 @@ Status DBImpl::FinishCompactionOutputFile(CompactionState* compact,
           (unsigned long long) current_bytes);
     }
   }
+  if (s.ok() && input->Valid() && compact->compaction->compact_type == Compaction::MULTI) {
+      s = MaybeReleaseFiles(compact, input);
+  }
   return s;
 }
 
 
-Status DBImpl::InstallCompactionResults(CompactionState* compact) {
-  mutex_.AssertHeld();
-  int nlevel = compact->compaction->GetResultLevel(compact->total_bytes);
-  Log(options_.info_log,  "Compacted inputs => level-%d %lu files %lld bytes",
-      nlevel, compact->outputs.size(),
+Status DBImpl::InstallCompactionResults(CompactionState* compact, Iterator* input) {
+    mutex_.AssertHeld();
+    Compaction* c = compact->compaction;
+    bool partial = c->compact_type == Compaction::MULTI;
+    int level = partial ? c->high_level_ + 1 : c->GetResultLevel(compact->total_bytes);
+    Log(options_.info_log,  "Compacted inputs %s => level-%d %lu files %lld bytes",
+      LevelSummary(c->inputs_).c_str(), level, compact->outputs.size(),
       static_cast<long long>(compact->total_bytes));
+    Slice ukey;
+    if (input->Valid()) {
+        ParsedInternalKey ikey;
+        ParseInternalKey(input->key(), &ikey);
+        ukey = ikey.user_key;
+    }
+    VersionEdit edit;
+    for (int l = c->low_level_; l <= c->high_level_; l ++) {
+      std::vector<FileMetaData*> keep;
+      for (int j = 0; j < c->inputs_[l].size(); j++) {
+          const Slice file_limit = c->inputs_[l][j]->largest.user_key();
+          if (!partial || !input->Valid() || user_comparator()->Compare(file_limit, ukey) < 0) {
+              edit.DeleteFile(l, c->inputs_[l][j]->number);
+          } else {
+              keep.push_back(c->inputs_[l][j]);
+          }
+      }
+      c->inputs_[l].swap(keep);
+    }
 
-  // Add compaction outputs
-  compact->compaction->AddInputDeletions(compact->compaction->edit());
-  for (size_t i = 0; i < compact->outputs.size(); i++) {
-    const CompactionState::Output& out = compact->outputs[i];
-    compact->compaction->edit()->AddFile(
-        nlevel,
-        out.number, out.file_size, out.smallest, out.largest);
-  }
-  return versions_->LogAndApply(compact->compaction->edit(), &mutex_);
+    for (size_t i = 0; i < compact->outputs.size(); i++) {
+        const CompactionState::Output& out = compact->outputs[i];
+        edit.AddFile(
+            level,
+            out.number, out.file_size, out.smallest, out.largest);
+    }
+    Status s = versions_->LogAndApply(&edit, &mutex_);
+    if (s.ok()) {
+        for (size_t i = 0; i < compact->outputs.size(); i++) {
+            const CompactionState::Output &out = compact->outputs[i];
+            pending_outputs_.erase(out.number);
+        }
+        compact->outputs.clear();
+        compact->total_bytes = 0;
+    }
+    return s;
+}
+
+Status DBImpl::FinishCompaction(CompactionState* compact, Iterator* input){
+    Status st = InstallCompactionResults(compact, input);
+    if (!st.ok()) {
+        return st;
+    }
+    Compaction* c = compact->compaction;
+    int olevel = c->compact_type == Compaction::MULTI ? c->high_level_ + 1 : c->GetResultLevel(0);
+    int level = c->GetResultLevel(versions_->NumLevelBytes(olevel));
+    Version* cur = versions_->current();
+    std::vector<FileMetaData*> files;
+    cur->GetOverlappingInputs(olevel, NULL, NULL, &files);
+    if (level != olevel) {
+        VersionEdit edit;
+        for (size_t i = 0; i < files.size(); i ++) {
+            FileMetaData* f = files[i];
+            edit.DeleteFile(olevel, f->number);
+            edit.AddFile(level, f->number, f->file_size, f->smallest, f->largest);
+        }
+        st = versions_->LogAndApply(&edit, &mutex_);
+        Log(options_.info_log, "Moving %lu files from level %d to level %d status %d",
+            files.size(), olevel, level, st.ok());
+    }
+    return st;
+}
+
+Status DBImpl::MaybeReleaseFiles(CompactionState* compact, Iterator*& input) {
+    Status st;
+    if (compact->outputs.size() % config::kReleaseCompactionFileTrigger != 0) {
+        return st;
+    }
+    MutexLock l(&mutex_);
+    std::string okey = input->key().ToString();
+    st = InstallCompactionResults(compact, input);
+    if (!st.ok()) {
+        return st;
+    }
+    Compaction* c = compact->compaction;
+    c->input_version_->Unref();
+    c->input_version_ = versions_->current();
+    c->input_version_->Ref();
+    delete input;
+    input = versions_->MakeInputIterator(c);
+    input->Seek(okey);
+    DeleteObsoleteFiles();
+    return st;
 }
 
 Status DBImpl::DoCompactionWork(CompactionState* compact) {
@@ -892,6 +971,8 @@ Status DBImpl::DoCompactionWork(CompactionState* compact) {
         Compaction* c = versions_->PickCompaction(compact->compaction->low_level_);
         if (c) {
           CompactAndRelease(c, false, InternalKey());
+          delete c;
+          DeleteObsoleteFiles();
         }
       }
       mutex_.Unlock();
@@ -981,8 +1062,6 @@ Status DBImpl::DoCompactionWork(CompactionState* compact) {
   if (status.ok()) {
     status = input->status();
   }
-  delete input;
-  input = NULL;
 
   CompactionStats stats;
   stats.micros = env_->NowMicros() - start_micros - imm_micros;
@@ -992,20 +1071,20 @@ Status DBImpl::DoCompactionWork(CompactionState* compact) {
   }
 
   mutex_.Lock();
-  int level = compact->compaction->GetResultLevel(stats.bytes_written);
-  stats_[level].Add(stats);
-
-  if (status.ok()) {
-    status = InstallCompactionResults(compact);
-  }
-  if (!status.ok()) {
-    RecordBackgroundError(status);
-  }
   VersionSet::LevelSummaryStorage tmp;
   Log(options_.info_log,
-      "compacted to: read %lld written %lld used %lld micros status %s %s",
+      "compacted to: read %lld written %lld used %lld micros status %s compact type %d %s",
       stats.bytes_read, stats.bytes_written, stats.micros, status.ToString().c_str(),
+      compact->compaction->compact_type,
       versions_->LevelSummary(&tmp));
+
+  if (status.ok()) {
+      status = FinishCompaction(compact, input);
+  }
+  if (!status.ok()) {
+      RecordBackgroundError(status);
+  }
+  delete input;
   return status;
 }
 
@@ -1015,6 +1094,7 @@ struct IterState {
   Version* version;
   MemTable* mem;
   MemTable* imm;
+    Logger* log;
 };
 
 static void CleanupIteratorState(void* arg1, void* arg2) {
@@ -1052,6 +1132,7 @@ Iterator* DBImpl::NewInternalIterator(const ReadOptions& options,
   cleanup->mem = mem_;
   cleanup->imm = imm_;
   cleanup->version = versions_->current();
+    cleanup->log = options_.info_log;
   internal_iter->RegisterCleanup(CleanupIteratorState, cleanup, NULL);
 
   *seed = ++seed_;

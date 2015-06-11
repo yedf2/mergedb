@@ -1165,6 +1165,7 @@ void VersionSet::AddLiveFiles(std::set<uint64_t>* live) {
       }
     }
   }
+    Log(options_->info_log, "after addlive size is %lu\n", live->size());
 }
 
 int64_t VersionSet::NumLevelBytes(int level) const {
@@ -1277,7 +1278,8 @@ Compaction* VersionSet::PickCompaction(int level_outer) {
     if (current_->no_compaction_) {
         return NULL;
     }
-    Log(options_->info_log, "Picking Compaction level_outer %d %s", level_outer, summary.c_str());
+    Log(options_->info_log, "Picking Compaction version %p ref %d level_outer %d %s",
+        current_, current_->cref(), level_outer, summary.c_str());
     MultiLevelCompaction* c = new MultiLevelCompaction(current_, options_->write_buffer_size, level_outer);
 
     int top_level = std::min(level_outer - 1, current_->top_level_);
@@ -1314,19 +1316,21 @@ Compaction* VersionSet::PickCompaction(int level_outer) {
                 continue;
             }
             if (i && !NumLevelFiles(i) && total_bytes < c->GetLevelBytes(i)) {
-                Log(options_->info_log, "i %d total %ld level max %ld",
+                Log(options_->info_log, "i %d total %ld level max %llu",
                     i, total_bytes/options_->write_buffer_size,
-                    c->GetLevelBytes(i)/options_->write_buffer_size);
+                    (unsigned long long)(c->GetLevelBytes(i)/options_->write_buffer_size));
                 break;
             }
         }
     }
     c->FinishInputs();
     summary = leveldb::LevelSummary(c->inputs_);
-    bool stalling = c->high_level_ == c->level_outer_ - 1;
+    bool stalling = NumLevelFiles(c->high_level_+1) > 0 || c->high_level_ == c->level_outer_ - 1;
     if (c->input_bytes_) {
-        Log(options_->info_log, "Compacting %ld files %ld bytes level_outer %d c->level_outer %d stalling %d %s",
-            c->input_files_, c->input_bytes_, level_outer, c->level_outer_, stalling, summary.c_str());
+        Log(options_->info_log, "Compacting %lld files %lld bytes level_outer %d c->level_outer %d stalling %d"
+        " compact %s version %s",
+            c->input_files_, c->input_bytes_, level_outer, c->level_outer_, stalling,
+            leveldb::LevelSummary(c->inputs_).c_str(), summary.c_str());
     } else {
         current_->no_compaction_ = true;
     }
@@ -1437,8 +1441,8 @@ Compaction::Compaction(Version* input_version):
     input_version_(input_version),
     input_bytes_(0),
     input_files_(0),
-    high_level_(0),
-    low_level_(0)
+    high_level_(-1),
+    low_level_(-1)
 {
     input_version_->Ref();
     for (int i = 0; i < config::kNumLevels; i++) {
@@ -1455,7 +1459,7 @@ void Compaction::FinishInputs() {
         if (input_version_->files_[i].size()) {
             max_level_ = i;
         }
-        if (!low_level_ && inputs_[i].size()) {
+        if (low_level_ == -1 && inputs_[i].size()) {
             low_level_ = i;
         }
         if (inputs_[i].empty()) {
@@ -1476,9 +1480,9 @@ void Compaction::ReleaseInputs() {
     }
 }
 
-size_t MultiLevelCompaction::level_bytes_[config::kNumLevels];
+int64_t MultiLevelCompaction::level_bytes_[config::kNumLevels];
 
-int MultiLevelCompaction::GetResultLevel(size_t bytes) {
+int MultiLevelCompaction::GetResultLevel(int64_t bytes) {
     assert(low_level_ < level_outer_);
     int level = GetBytesLevel(bytes);
     return std::min(level_outer_ - 1, std::max(low_level_, level));
@@ -1497,14 +1501,6 @@ bool Compaction::IsTrivialMove(const Comparator* ucmp) const {
         }
     }
     return true;
-}
-
-void Compaction::AddInputDeletions(VersionEdit* edit) {
-    for (size_t i = 0; i < config::kNumLevels; i ++) {
-        for (size_t j = 0; j < inputs_[i].size(); j++) {
-            edit->DeleteFile(i, inputs_[i][j]->number);
-        }
-    }
 }
 
 bool Compaction::IsBaseLevelForKey(const Slice& user_key) {

@@ -503,6 +503,12 @@ class DBTest {
   }
 };
 
+static std::string Key(int i) {
+    char buf[100];
+    snprintf(buf, sizeof(buf), "key%06d", i);
+    return std::string(buf);
+}
+
 TEST(DBTest, Empty) {
   do {
     ASSERT_TRUE(db_ != NULL);
@@ -903,12 +909,6 @@ TEST(DBTest, RecoverDuringMemtableCompaction) {
     ASSERT_EQ(std::string(10000000, 'x'), Get("big1"));
     ASSERT_EQ(std::string(1000, 'y'), Get("big2"));
   } while (ChangeOptions());
-}
-
-static std::string Key(int i) {
-  char buf[100];
-  snprintf(buf, sizeof(buf), "key%06d", i);
-  return std::string(buf);
 }
 
 TEST(DBTest, MinorCompactionsHappen) {
