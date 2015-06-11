@@ -1293,7 +1293,8 @@ Compaction* VersionSet::PickCompaction(int level_outer) {
         c->inputs_[top_level] = current_->files_[top_level];
         c->inputs_[top_level-1] = current_->files_[top_level-1];
         c->inputs_[top_level-2] = current_->files_[top_level-2];
-    } else if ((sel = GetAdjacentFull(current_->files_, top_level, config::kCompactLevelsMax)) > 0){
+    } else if (top_level > config::kCompactLevelsMax
+               && (sel = GetAdjacentFull(current_->files_, top_level, config::kCompactLevelsMax)) > 0){
         for (int j = 0; j < config::kCompactLevelsMax; j++) {
             c->inputs_[sel - j] = current_->files_[sel -j];
         }
