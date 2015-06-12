@@ -1,4 +1,4 @@
-[中文版](https://github.com/yedf/mergedb/README-cn.md)
+[中文版](https://github.com/yedf/mergedb/blob/master/README-cn.md)
 
 ## MergeDB: a leveldb variant with faster write speed
 
