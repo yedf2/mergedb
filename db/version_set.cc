@@ -446,16 +446,8 @@ Status Version::Get(const ReadOptions& options,
 }
 
 bool Version::UpdateStats(const GetStats& stats) {
-  FileMetaData* f = stats.seek_file;
-  if (f != NULL) {
-    f->allowed_seeks--;
-    if (f->allowed_seeks <= 0 && file_to_compact_ == NULL) {
-      file_to_compact_ = f;
-      file_to_compact_level_ = stats.seek_file_level;
-      return true;
-    }
-  }
-  return false;
+    allowed_gets_--;
+    return allowed_gets_ <= 0;
 }
 
 bool Version::RecordReadSample(Slice internal_key) {
@@ -1275,9 +1267,10 @@ int GetAdjacentFull(std::vector<FileMetaData*> files[], int top, int adjacent) {
 
 Compaction* VersionSet::PickCompaction(int level_outer) {
     std::string summary = leveldb::LevelSummary(current_->files_);
-    if (current_->no_compaction_) {
+    if (!current_->NeedsCompaction()) {
         return NULL;
     }
+    int seek_max_level = 4;
     Log(options_->info_log, "Picking Compaction version %p ref %d level_outer %d %s",
         current_, current_->cref(), level_outer, summary.c_str());
     MultiLevelCompaction* c = new MultiLevelCompaction(current_, options_->write_buffer_size, level_outer);
@@ -1303,6 +1296,7 @@ Compaction* VersionSet::PickCompaction(int level_outer) {
         c->level_outer_ = sel;
     } else if ((level_outer == config::kNumLevels && current_->files_[0].size() >= config::kL0_CompactionTrigger) // normal
             || (level_outer > 1 && current_->files_[0].size() >= config::kL0_SlowdownWritesTrigger) // inner compaction
+            || current_->allowed_gets_ <= 0 // seek compaction
             || level2_bytes > c->GetLevelBytes(2)) // sequential write will write to level2
     {
         size_t total_bytes = 0;
@@ -1316,6 +1310,7 @@ Compaction* VersionSet::PickCompaction(int level_outer) {
             // level2 need compaction, special case when fillseq
                 continue;
             }
+            if (i < seek_max_level && current_->allowed_gets_ <= 0) continue;
             if (i && !NumLevelFiles(i) && total_bytes < c->GetLevelBytes(i)) {
                 Log(options_->info_log, "i %d total %ld level max %llu",
                     i, total_bytes/options_->write_buffer_size,
@@ -1327,6 +1322,19 @@ Compaction* VersionSet::PickCompaction(int level_outer) {
     c->FinishInputs();
     summary = leveldb::LevelSummary(c->inputs_);
     bool stalling = NumLevelFiles(c->high_level_+1) > 0 || c->high_level_ == c->level_outer_ - 1;
+    if (current_->allowed_gets_ <= 0) {
+        current_->allowed_gets_ = 1LL << 62;
+        if (c->high_level_ == c->low_level_ && c->high_level_ >= 1)
+            c->input_bytes_ = 0; // no need to do compaction
+    } else {
+        current_->allowed_gets_ = 0;
+        for (int i = 0; i <= seek_max_level; i ++) {
+            current_->allowed_gets_ += NumLevelBytes(i);
+        }
+        current_->allowed_gets_ /= 16384;
+        if (current_->allowed_gets_ < 100)
+            current_->allowed_gets_ = 100;
+    }
     if (c->input_bytes_) {
         Log(options_->info_log, "Compacting %lld files %lld bytes level_outer %d c->level_outer %d stalling %d"
         " compact %s version %s",

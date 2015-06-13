@@ -120,6 +120,8 @@ class Version {
   // Return a human readable string that describes this version's contents.
   std::string DebugString() const;
 
+  bool NeedsCompaction() const { return !no_compaction_ || allowed_gets_ <= 0; }
+
  private:
   friend class Compaction;
   friend class VersionSet;
@@ -154,6 +156,7 @@ class Version {
   double compaction_score_;
   int top_level_;
   bool no_compaction_;
+  int64_t allowed_gets_;
   int compaction_level_;
 
   explicit Version(VersionSet* vset)
@@ -163,6 +166,7 @@ class Version {
         compaction_score_(-1),
         top_level_(-1),
         no_compaction_(false),
+        allowed_gets_(1LL << 61),
         compaction_level_(-1) {
   }
 
@@ -260,8 +264,9 @@ class VersionSet {
 
   // Returns true iff some level needs a compaction.
   bool NeedsCompaction() const {
-    Version* v = current_;
-    return (v->compaction_score_ >= 1) || (v->file_to_compact_ != NULL);
+    return current_->NeedsCompaction();
+    //Version* v = current_;
+    //return (v->compaction_score_ >= 1) || (v->file_to_compact_ != NULL);
   }
 
   // Add all files listed in any live version to *live.
