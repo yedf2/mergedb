@@ -19,7 +19,7 @@ namespace leveldb {
 // Grouping of constants.  We may want to make some of these
 // parameters set via options.
 namespace config {
-static const int kNumLevels = 28;
+static const int kNumLevels = 23;
 
 // Release Compaction input file when output files reach this threshold
 static const int kReleaseCompactionFileTrigger = 64;
@@ -36,7 +36,7 @@ static const double kLevelRatio = 2;
 // it may use up to 2.1*x bytes if level bytes is x, x, x/10, x/100 ....
 // In this modified version, if kLevelRation==2, then levels may be x, x, x/2, x/4, ....
 // use up to 3*x bytes. We do a compaction to save space.
-static const double kExtraSpace = 1.3;
+static const double kExtraSpace = 0.25;
 
 // Level-0 compaction is started when we hit this many files.
 static const int kL0_CompactionTrigger = 4;

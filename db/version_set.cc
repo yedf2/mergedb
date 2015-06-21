@@ -1265,6 +1265,27 @@ int GetAdjacentFull(std::vector<FileMetaData*> files[], int top, int adjacent) {
     return 0;
 }
 
+bool VersionSet::CompactionByExtraSpace(Compaction* c, int level_outer) {
+    static const int check_levels = 5;
+    int ltop = current_->top_level_;
+    if (level_outer == config::kNumLevels && ltop > check_levels) {
+        size_t top_bytes = NumLevelBytes(ltop);
+        size_t extra_bytes = 0;
+        for (int i = ltop - 1; i > ltop - check_levels; i --) {
+            extra_bytes += NumLevelBytes(i);
+        }
+        double extra = extra_bytes * 1.0 / top_bytes;
+        if (extra >= config::kExtraSpace) {
+            for (int i = ltop; i > ltop - check_levels; i --) {
+                c->inputs_[i] = current_->files_[i];
+            }
+            Log(options_->info_log, "extra space %.2f > %f do a compaction", extra, config::kExtraSpace);
+            return true;
+        }
+    }
+    return false;
+}
+
 Compaction* VersionSet::PickCompaction(int level_outer) {
     std::string summary = leveldb::LevelSummary(current_->files_);
     if (!current_->NeedsCompaction()) {
@@ -1276,16 +1297,9 @@ Compaction* VersionSet::PickCompaction(int level_outer) {
     MultiLevelCompaction* c = new MultiLevelCompaction(current_, options_->write_buffer_size, level_outer);
 
     int top_level = std::min(level_outer - 1, current_->top_level_);
-    size_t top_bytes = top_level < 3 ? 1 : NumLevelBytes(top_level);
-    size_t top2_bytes = top_level < 3 ? 0 : NumLevelBytes(top_level-1) + NumLevelBytes(top_level-2);
     int sel = 0;
     size_t level2_bytes = NumLevelBytes(2);
-    if (level_outer == config::kNumLevels && current_->top_level_ > 5
-            && top2_bytes / top_bytes > config::kExtraSpace)
-    {   // check for extra space, you may make this compaction less priority
-        c->inputs_[top_level] = current_->files_[top_level];
-        c->inputs_[top_level-1] = current_->files_[top_level-1];
-        c->inputs_[top_level-2] = current_->files_[top_level-2];
+    if (CompactionByExtraSpace(c, level_outer)) {
     } else if (top_level > config::kCompactLevelsMax
                && (sel = GetAdjacentFull(current_->files_, top_level, config::kCompactLevelsMax)) > 0){
         for (int j = 0; j < config::kCompactLevelsMax; j++) {

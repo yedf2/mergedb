@@ -304,6 +304,9 @@ class VersionSet {
 
   void SetupOtherInputs(SingleLevelCompaction* c);
 
+  bool CompactionByExtraSpace(Compaction* c, int level_outer);
+
+
   // Save current contents to *log
   Status WriteSnapshot(log::Writer* log);
 
