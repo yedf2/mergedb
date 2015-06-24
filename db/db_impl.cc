@@ -1366,6 +1366,7 @@ Status DBImpl::MakeRoomForWrite(bool force) {
   bool allow_delay = !force;
   Status s;
   while (true) {
+    int level0files = versions_->NumLevelFiles(0);
     if (!bg_error_.ok()) {
       // Yield previous error
       s = bg_error_;
@@ -1380,7 +1381,10 @@ Status DBImpl::MakeRoomForWrite(bool force) {
       // this delay hands over some CPU to the compaction thread in
       // case it is sharing the same core as the writer.
       mutex_.Unlock();
-      env_->SleepForMicroseconds(1000);
+      if (level0files >= config::kL0_SlowdownWritesTrigger2)
+        env_->SleepForMicroseconds(10*1000);
+      else
+        env_->SleepForMicroseconds(1000);
       allow_delay = false;  // Do not delay a single write more than once
       mutex_.Lock();
     } else if (!force &&

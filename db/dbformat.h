@@ -30,7 +30,7 @@ static const int kCompactLevelsMax = 4;
 // Level n bytes will be level n-1 bytes * kLevelRatio
 static const double kLevelRatio = 2;
 
-// Extra space in top 3 level. if bytes in top 3 levels exceed (kExtraSpace + 1) * x,
+// Extra space in top 5 level. if bytes in top 5 levels exceed (kExtraSpace + 1) * x,
 // where x is the total byte for top level,
 // compaction will start. In origin leveldb, if we store x bytes with overwriting keys,
 // it may use up to 2.1*x bytes if level bytes is x, x, x/10, x/100 ....
@@ -44,8 +44,11 @@ static const int kL0_CompactionTrigger = 4;
 // Soft limit on number of level-0 files.  We slow down writes at this point.
 static const int kL0_SlowdownWritesTrigger = 8;
 
+// Soft limit on number of level-0 files.  We greatly slow down writes at this point.
+static const int kL0_SlowdownWritesTrigger2 = 12;
+
 // Maximum number of level-0 files.  We stop writes at this point.
-static const int kL0_StopWritesTrigger = 12;
+static const int kL0_StopWritesTrigger = 16;
 
 // Maximum level to which a new compacted memtable is pushed if it
 // does not create overlap.  We try to push to level 2 to avoid the
