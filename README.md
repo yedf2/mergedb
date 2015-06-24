@@ -19,7 +19,7 @@ Benchmark run on my macbook shows following
 *   leveldb 15.6M/s
 *   mergedb 25.7M/s
 
-### Space Consumption
+### Space Consumptionb
 
 *   leveldb 4.4G
 *   mergedb 4.1G
@@ -32,7 +32,9 @@ This benchmarks runs on my macbook.
 *   Memory 8 GB 1867 MHz DDR3
 
 Use of bloom filter with 15 bits will reduce 99.9% miss read, so both LevelDB and MergeDb 's read qps is about the same as iops of disk.  
-Both leveldb and mergedb 's read speed is about 60 micros/op when the data is not in buffer.
+Both leveldb and mergedb 's read speed is about 281 micros/op when the data is not in buffer.
+
+    ./db_bench --benchmarks=readrandom --num=6000000 --threads=1 --value_size=1024 --cache_size=104857600 --bloom_bits=10 --open_files=500000 --db=ldb --compression_ratio=1 --use_existing_db=1 --reads=20000
 
 Testing a large db will take several days, so the above benchmarks only test a db with very few data.   
 I simulate a large db for LevelDB by changing the write_buffer_size and level1 size to get a db with more levels(7 levels with only a little data in level 6).

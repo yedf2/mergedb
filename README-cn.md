@@ -1,41 +1,73 @@
-## MergeDB 更快的leveldb
+# MergeDB 更快的leveldb
 
 MergeDB基于Sanjay Ghemawat (sanjay@google.com)和Jeff Dean (jeff@google.com)的LevelDB
 
-LevelDB写放大问题严重影响了应用的写性能。对于一个普通的数据库写操作，LevelDB需要写一次到Log，一次到level0，11次写才能够让数据所在的level上升到level+1。假设数据库有7层，那么数据到达level6需要1+1+6*11=68次写。而MergeDB使用新的层级策略和压缩策略只需要大约15次写。
+# 改进
 
-## 性能测试
+在我的macbook上的测试对比
 
-由于没有合适的机器做测试，只在阿里云上得一台普通服务器上进行了简单的测试。对于更大的数据库，性能的差别更加明显
+    ./db_bench --benchmarks=fillrandom --num=6000000 --threads=1 --value_size=1024 --cache_size=104857600 --bloom_bits=10 --open_files=500000 --db=ldb --compression_ratio=1 --use_existing_db=0
 
-## 普通硬盘测试
 
-测试机为一台阿里云的ECS：
+### 写性能
 
-  * 2 * Intel(R) Xeon(R) CPU E5-2650 v2 @ 2.60GHz
-  * 4G 内存
-  * 磁盘写入速度大约为45M/s（通过命令'cp /dev/zero ./test'观测）
-  * 2M条记录，key为16字节，value为4K字节
-  * 数据库总大小为8G，snappy没有打开
+*   leveldb 15.6M/s
+*   mergedb 25.7M/s
 
-### 随机写测试
+### 磁盘空间使用
 
-测试随机写性能，数据库初始时为空，写入的过程中，没有读操作
+*   leveldb 4.4G
+*   mergedb 4.1G
 
-    mergedb: 853.131 micros/op;    4.6 MB/s
-    leveldb: 1913.242 micros/op;    2.0 MB/s
+### 性能测试环境
 
-LevelDB与MergeDb的命令相同，如下：
+macbook.  
 
-    ./db_bench --benchmarks=fillrandom --num=2000000 --threads=1 --value_size=4096 --cache_size=104857600 --bloom_bits=10 --open_files=500000 --db=ldb --compression_ratio=1 --write_buffer_size=2097152 --use_existing_db=0
+*   CPU 2.7 GHz Intel Core i5 2 cores
+*   Memory 8 GB 1867 MHz DDR3
 
-### 随机读测试
+15bit的bloomfilter可以将减少99.9%的无法命中读操作，因此LevelDB与MergeDB的读性能与磁盘的iops基本相等（当然数据在缓存中则读qps会大很多）。
+当数据没有被缓存时，LevelDB和MergeDB的随机读测试结果为281.055 micros/op。命令如下
 
-测试随机读性能，数据库由前一个随机写创建。由于数据库较小，读取时会有很大比例在缓冲当中，因此测试读取之前我清空了缓存。读取的数目为2w，按照一般硬盘的速度，每秒100-200个随机io，2M条记录需要几个小时。
+    ./db_bench --benchmarks=readrandom --num=6000000 --threads=1 --value_size=1024 --cache_size=104857600 --bloom_bits=10 --open_files=500000 --db=ldb --compression_ratio=1 --write_buffer_size=2097152 --use_existing_db=1 --reads=20000
 
-    mergedb: 6587.220 micros/op   151.80 op/s
-    leveldb: 6493.976 micros/op   153.98 op/s
+测试一个几百G的数据库读写操作需要几天的时间，这里通过修改levelDB的write_buffer_size参数和level n的size来让LevelDB产生更多的level（一共7层数据，level6上有一点点数据）。
+可以类似的达到一个大数据库的效果
 
-命令如下：
+    ./db_bench --benchmarks=fillrandom --num=6000000 --threads=1 --value_size=1024 --cache_size=104857600 --bloom_bits=10 --open_files=500000 --db=ldb --compression_ratio=1 --use_existing_db=0 --write_buffer_size=65536
 
-    echo 1 > /proc/sys/vm/drop_caches; ./db_bench --benchmarks=readrandom --num=2000000 --threads=1 --value_size=4096 --cache_size=104857600 --bloom_bits=10 --open_files=500000 --db=ldb --compression_ratio=1 --write_buffer_size=2097152 --use_existing_db=1 --reads=20000
+写入性能
+
+*   leveldb 5.0M/s
+*   mergedb 9.9M/s
+
+# 算法
+
+*   函数定义:  
+    * level_size(n) level n 的数据大小  
+    * max_size(n) level n 可存放数据的最大大小
+    * acc_size(n) = level_size(0) + level_size(1) + ... + level_size(n)  
+    * N 有数据的最大层
+*   max_size(n+1) / max_size(n) 由10改为2
+*   选择level 0 到 level k进行压缩  
+    k 是acc_size(k) < max_size(k)的最大值  
+    这个策略之下，产生一个每层都达到最大数据量的db写入次数（不包括写入log和level0） 
+        writes(n) = writes(n-1) + writes-for-only-level(n)  
+    层级 n 的数据可以通过对level 0 到 level n-1 的所有数据进行一次压缩获得 
+        writes-for-only-level(n) = writes(n-1) + max_size(n)  
+        write(n) = writes(n-1) + write(n-1) + max_size(n)
+            = 2 * writes(n-1) + max_size(n)
+            = 4 * writes(n-2) + 2 * max_size(n-1) + max_size(n)
+            = 4 * writes(n-2) + 2 * max_size(n)
+            = n * max_size(n)
+            = n * size_of_db / 2
+    最后的写放大是n/2
+*   对所有层级进行一次压缩会耗费大量的时间，期间如果停止写入操作是不可行的，
+    因此每次我们都会从外层（较大的n）开始查找，找到连续非空的4层则进行压缩。  
+    外层的压缩进行时，内层可以启动新的压缩。即外层压缩期间，可以接受的新写入数据量理想情况下可以达到外层压缩数据量的1/16.  
+*   对于一个会重复写入数据的应用来书，当最外层N的数据量约等于N-1层的数据量时，则各层数据量分别为X X X/2 X/4 ...   
+    X的数据占用了3X的空间。
+    为了节约空间，每次检查最外5层，如果
+        sum_size(N, N-1, ..., N-4)/level_size(N) > 1.25
+    则进行一次压缩，保证最多只占用1.25X的空间
+
